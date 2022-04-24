@@ -1,5 +1,5 @@
 import { PusherRoom } from "../Model/PusherRoom";
-import { CharacterLayer, ExSocketInterface } from "../Model/Websocket/ExSocketInterface";
+import { ExSocketInterface } from "../Model/Websocket/ExSocketInterface";
 import {
     AdminMessage,
     AdminPusherToBackMessage,
@@ -38,6 +38,8 @@ import {
     ErrorMessage,
     WorldFullMessage,
     PlayerDetailsUpdatedMessage,
+    LockGroupPromptMessage,
+    InvalidTextureMessage,
 } from "../Messages/generated/messages_pb";
 import { ProtobufUtils } from "../Model/Websocket/ProtobufUtils";
 import { ADMIN_API_URL, JITSI_ISS, JITSI_URL, SECRET_JITSI_KEY } from "../Enum/EnvironmentVariable";
@@ -52,7 +54,8 @@ import Debug from "debug";
 import { ExAdminSocketInterface } from "_Model/Websocket/ExAdminSocketInterface";
 import { WebSocket } from "uWebSockets.js";
 import { isRoomRedirect } from "../Messages/JsonMessages/RoomRedirect";
-import { CharacterTexture } from "../Messages/JsonMessages/CharacterTexture";
+//import { CharacterTexture } from "../Messages/JsonMessages/CharacterTexture";
+import { compressors } from "hyper-express";
 
 const debug = Debug("socket");
 
@@ -120,7 +123,13 @@ export class SocketManager implements ZoneEventListener {
                 }
             })
             .on("end", () => {
-                console.warn("Admin connection lost to back server");
+                console.warn(
+                    "Admin connection lost to back server '" +
+                        apiClient.getChannel().getTarget() +
+                        "' for room '" +
+                        roomId +
+                        "'"
+                );
                 // Let's close the front connection if the back connection is closed. This way, we can retry connecting from the start.
                 if (!client.disconnecting) {
                     this.closeWebsocketConnection(client, 1011, "Admin Connection lost to back server");
@@ -128,7 +137,14 @@ export class SocketManager implements ZoneEventListener {
                 console.log("A user left");
             })
             .on("error", (err: Error) => {
-                console.error("Error in connection to back server:", err);
+                console.error(
+                    "Error in connection to back server '" +
+                        apiClient.getChannel().getTarget() +
+                        "' for room '" +
+                        roomId +
+                        "':",
+                    err
+                );
                 if (!client.disconnecting) {
                     this.closeWebsocketConnection(client, 1011, "Error while connecting to back server");
                 }
@@ -174,15 +190,18 @@ export class SocketManager implements ZoneEventListener {
 
             for (const characterLayer of client.characterLayers) {
                 const characterLayerMessage = new CharacterLayerMessage();
-                characterLayerMessage.setName(characterLayer.name);
+                characterLayerMessage.setName(characterLayer.id);
                 if (characterLayer.url !== undefined) {
                     characterLayerMessage.setUrl(characterLayer.url);
+                }
+                if (characterLayer.layer !== undefined) {
+                    characterLayerMessage.setLayer(characterLayer.layer);
                 }
 
                 joinRoomMessage.addCharacterlayer(characterLayerMessage);
             }
 
-            console.log("Calling joinRoom");
+            console.log("Calling joinRoom '" + client.roomId + "'");
             const apiClient = await apiClientRepository.getClient(client.roomId);
             const streamToPusher = apiClient.joinRoom();
             clientEventsEmitter.emitClientJoin(client.userUuid, client.roomId);
@@ -210,7 +229,13 @@ export class SocketManager implements ZoneEventListener {
                     }
                 })
                 .on("end", () => {
-                    console.warn("Connection lost to back server");
+                    console.warn(
+                        "Connection lost to back server '" +
+                            apiClient.getChannel().getTarget() +
+                            "' for room '" +
+                            client.roomId +
+                            "'"
+                    );
                     // Let's close the front connection if the back connection is closed. This way, we can retry connecting from the start.
                     if (!client.disconnecting) {
                         this.closeWebsocketConnection(client, 1011, "Connection lost to back server");
@@ -218,7 +243,14 @@ export class SocketManager implements ZoneEventListener {
                     console.log("A user left");
                 })
                 .on("error", (err: Error) => {
-                    console.error("Error in connection to back server:", err);
+                    console.error(
+                        "Error in connection to back server '" +
+                            apiClient.getChannel().getTarget() +
+                            "' for room '" +
+                            client.roomId +
+                            "':",
+                        err
+                    );
                     if (!client.disconnecting) {
                         this.closeWebsocketConnection(client, 1011, "Error while connecting to back server");
                     }
@@ -289,6 +321,12 @@ export class SocketManager implements ZoneEventListener {
     handleFollowAbort(client: ExSocketInterface, message: FollowAbortMessage): void {
         const pusherToBackMessage = new PusherToBackMessage();
         pusherToBackMessage.setFollowabortmessage(message);
+        client.backConnection.write(pusherToBackMessage);
+    }
+
+    handleLockGroup(client: ExSocketInterface, message: LockGroupPromptMessage): void {
+        const pusherToBackMessage = new PusherToBackMessage();
+        pusherToBackMessage.setLockgrouppromptmessage(message);
         client.backConnection.write(pusherToBackMessage);
     }
 
@@ -544,36 +582,6 @@ export class SocketManager implements ZoneEventListener {
         });
     }
 
-    /**
-     * Merges the characterLayers received from the front (as an array of string) with the custom textures from the back.
-     */
-    static mergeCharacterLayersAndCustomTextures(
-        characterLayers: string[],
-        memberTextures: CharacterTexture[]
-    ): CharacterLayer[] {
-        const characterLayerObjs: CharacterLayer[] = [];
-        for (const characterLayer of characterLayers) {
-            if (characterLayer.startsWith("customCharacterTexture")) {
-                const customCharacterLayerId: number = +characterLayer.substr(22);
-                for (const memberTexture of memberTextures) {
-                    if (memberTexture.id == customCharacterLayerId) {
-                        characterLayerObjs.push({
-                            name: characterLayer,
-                            url: memberTexture.url,
-                        });
-                        break;
-                    }
-                }
-            } else {
-                characterLayerObjs.push({
-                    name: characterLayer,
-                    url: undefined,
-                });
-            }
-        }
-        return characterLayerObjs;
-    }
-
     public onUserEnters(user: UserDescriptor, listener: ExSocketInterface): void {
         const subMessage = new SubMessage();
         subMessage.setUserjoinedmessage(user.toUserJoinedMessage());
@@ -619,7 +627,7 @@ export class SocketManager implements ZoneEventListener {
         emitInBatch(listener, subMessage);
     }
 
-    public emitWorldFullMessage(client: WebSocket) {
+    public emitWorldFullMessage(client: compressors.WebSocket) {
         const errorMessage = new WorldFullMessage();
 
         const serverToClientMessage = new ServerToClientMessage();
@@ -630,7 +638,7 @@ export class SocketManager implements ZoneEventListener {
         }
     }
 
-    public emitTokenExpiredMessage(client: WebSocket) {
+    public emitTokenExpiredMessage(client: compressors.WebSocket) {
         const errorMessage = new TokenExpiredMessage();
 
         const serverToClientMessage = new ServerToClientMessage();
@@ -641,7 +649,18 @@ export class SocketManager implements ZoneEventListener {
         }
     }
 
-    public emitConnexionErrorMessage(client: WebSocket, message: string) {
+    public emitInvalidTextureMessage(client: compressors.WebSocket) {
+        const errorMessage = new InvalidTextureMessage();
+
+        const serverToClientMessage = new ServerToClientMessage();
+        serverToClientMessage.setInvalidtexturemessage(errorMessage);
+
+        if (!client.disconnecting) {
+            client.send(serverToClientMessage.serializeBinary().buffer, true);
+        }
+    }
+
+    public emitConnexionErrorMessage(client: compressors.WebSocket, message: string) {
         const errorMessage = new WorldConnexionMessage();
         errorMessage.setMessage(message);
 

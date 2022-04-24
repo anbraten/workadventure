@@ -43,14 +43,35 @@
             playsinline
             on:click={() => (clickable ? highlightedEmbedScreen.toggleHighlight(embedScreen) : null)}
         />
+
+        <div class="video-controls">
+            <div class="">Fullscreen</div>
+            <div class="">Expand</div>
+        </div>
     {/if}
 </div>
 
 <style lang="scss">
     .video-container {
+        display: flex;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background-color: aqua;
         video {
-            width: 100%;
+           margin: auto;
+           width: 100%;
         }
+
+        .video-controls {
+            display: flex;
+            position: absolute;
+            bottom: 0;
+            right: 0;
+        }
+
         i {
             span {
                 padding: 2px 32px;
